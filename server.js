@@ -176,6 +176,9 @@ function parseNexonRankingApiResponse(body, searchName) {
   }
 }
 
+const NEXON_LOOKUP_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const nexonLookupCache = new Map(); // key: region:nameLower, value: { result, ts }
+
 function nexonLookup(name, region, wantDebug, cb) {
   if (typeof wantDebug === 'function') {
     cb = wantDebug;
@@ -187,6 +190,13 @@ function nexonLookup(name, region, wantDebug, cb) {
   }
   const trimmed = name.trim();
   const r = (region || 'north-america').toLowerCase().replace(/\s/g, '');
+  const cacheKey = r + ':' + trimmed.toLowerCase();
+  const cached = nexonLookupCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts < NEXON_LOOKUP_CACHE_TTL_MS)) {
+    const result = { ...cached.result };
+    if (wantDebug) result._debug = { source: 'cache', cachedAt: cached.ts };
+    return cb(result, 200);
+  }
   const apiRegion = r === 'europe' ? 'eu' : 'na';
   const apiUrl = `${NEXON_RANKING_API_BASE}/${apiRegion}?type=overall&id=legendary&reboot_index=0&page_index=1&character_name=${encodeURIComponent(trimmed)}`;
   const apiHeaders = {
@@ -205,6 +215,7 @@ function nexonLookup(name, region, wantDebug, cb) {
         : { source: 'nexon_html', htmlLength: 0, hasNextData: false, hint: 'Fell back to HTML (API may have failed).' };
     }
     delete result._worldID;
+    nexonLookupCache.set(cacheKey, { result: { ...result }, ts: Date.now() });
     cb(result, 200);
   }
 

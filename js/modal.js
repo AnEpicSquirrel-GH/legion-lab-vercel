@@ -612,14 +612,21 @@ async function handleLookup() {
     return;
   }
   addCharLookupAttempted = true;
-  setLookupStatus('Looking up…', 'loading');
+  const lookupBtn = document.getElementById('lookupBtn');
+  if (lookupBtn) lookupBtn.disabled = true;
+  setLookupStatus('Looking up… (may take 10–15 s)', 'loading');
   document.getElementById('charPreview').classList.add('hidden');
   const debugMode = typeof window.isDevMode === 'function' && window.isDevMode();
   var worldInput = document.getElementById('inputWorld');
   var region = (worldInput && worldInput.value && worldInput.value.trim()) || 'gms';
-  const raw = typeof lookupCharacter === 'function'
-    ? await lookupCharacter(name, region, debugMode ? { debug: true } : {})
-    : null;
+  let raw = null;
+  try {
+    raw = typeof lookupCharacter === 'function'
+      ? await lookupCharacter(name, region, debugMode ? { debug: true } : {})
+      : null;
+  } finally {
+    if (lookupBtn) lookupBtn.disabled = false;
+  }
   let result = null;
   let debug = null;
   let serverError = null;

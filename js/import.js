@@ -271,13 +271,34 @@
     showReview(dedupeRows(allParsed));
   });
 
-  /* ── Search: look up names from Nexon (one name per line), cache results, 5s cooldown ── */
+  /* ── Search: look up names from Nexon (one name per line), cache, 5s cooldown, parallel lookups ── */
   const importLookupBtn = document.getElementById('importLookupBtn');
   const importLookupRegion = document.getElementById('importLookupRegion');
   const importLookupStatus = document.getElementById('importLookupStatus');
   const importLookupCache = new Map(); // key: region:normalizedName, value: result object or null
   let lastImportSearchEndTime = 0;
   const IMPORT_SEARCH_COOLDOWN_MS = 5000;
+  const IMPORT_LOOKUP_CONCURRENCY = 4;
+
+  async function runWithConcurrency(items, fn, updateStatus) {
+    const results = [];
+    let next = 0;
+    async function worker() {
+      while (next < items.length) {
+        const i = next++;
+        const item = items[i];
+        if (updateStatus) updateStatus(i + 1, items.length, item.name);
+        try {
+          results[i] = await fn(item);
+        } catch (e) {
+          results[i] = null;
+        }
+      }
+    }
+    const workers = Array(Math.min(IMPORT_LOOKUP_CONCURRENCY, items.length)).fill(0).map(() => worker());
+    await Promise.all(workers);
+    return results;
+  }
 
   if (importLookupBtn && importLookupStatus) {
     importLookupBtn.addEventListener('click', async () => {
@@ -297,41 +318,64 @@
       }
       const region = (importLookupRegion && importLookupRegion.value) ? importLookupRegion.value : 'gms';
       importLookupBtn.disabled = true;
-      const results = [];
-      let fetched = 0;
+
+      const results = new Array(names.length);
+      const toFetch = [];
       for (let i = 0; i < names.length; i++) {
         const name = names[i];
         const cacheKey = region + ':' + name.toLowerCase();
         const cached = importLookupCache.get(cacheKey);
         if (cached !== undefined) {
-          results.push(cached === null
+          results[i] = cached === null
             ? { name, level: null, cls: null, world: null, imageUrl: null }
-            : { name: cached.name || name, level: cached.level ?? null, cls: cached.cls || null, world: cached.world || null, imageUrl: cached.imageUrl || null });
-          importLookupStatus.textContent = `Using cache for ${name} (${i + 1}/${names.length})…`;
-          importLookupStatus.style.color = 'var(--text-muted)';
-          continue;
-        }
-        importLookupStatus.textContent = `Looking up ${i + 1}/${names.length}: ${name}…`;
-        importLookupStatus.style.color = 'var(--accent)';
-        let result = null;
-        if (typeof lookupCharacter === 'function') {
-          result = await lookupCharacter(name, region);
-        }
-        if (result && typeof result === 'object') {
-          const row = { name: result.name || name, level: result.level ?? null, cls: result.cls || null, world: result.world || null, imageUrl: result.imageUrl || null };
-          importLookupCache.set(cacheKey, row);
-          results.push(row);
-          fetched++;
+            : { name: cached.name || name, level: cached.level ?? null, cls: cached.cls || null, world: cached.world || null, imageUrl: cached.imageUrl || null };
         } else {
-          importLookupCache.set(cacheKey, null);
-          results.push({ name, level: null, cls: null, world: null, imageUrl: null });
+          toFetch.push({ index: i, name });
         }
-        if (i < names.length - 1) await new Promise(r => setTimeout(r, 280));
       }
+
+      if (toFetch.length === 0) {
+        importLookupStatus.textContent = `Done — ${names.length} row(s) from cache. Wait 5s before searching again.`;
+        importLookupStatus.style.color = 'var(--text-muted)';
+        importLookupBtn.disabled = false;
+        showReview(dedupeRows(results));
+        return;
+      }
+
+      importLookupStatus.textContent = `Looking up 1–${Math.min(IMPORT_LOOKUP_CONCURRENCY, toFetch.length)} of ${toFetch.length} new…`;
+      importLookupStatus.style.color = 'var(--accent)';
+
+      const lookupCharacterFn = typeof lookupCharacter === 'function' ? lookupCharacter : () => null;
+      const fetchedResults = await runWithConcurrency(
+        toFetch,
+        async ({ index, name }) => {
+          try {
+            const result = await lookupCharacterFn(name, region);
+            const cacheKey = region + ':' + name.toLowerCase();
+            if (result && typeof result === 'object') {
+              const row = { name: result.name || name, level: result.level ?? null, cls: result.cls || null, world: result.world || null, imageUrl: result.imageUrl || null };
+              importLookupCache.set(cacheKey, row);
+              return { index, row };
+            }
+            importLookupCache.set(cacheKey, null);
+          } catch (_) {}
+          return { index, row: { name, level: null, cls: null, world: null, imageUrl: null } };
+        },
+        (done, total) => {
+          importLookupStatus.textContent = `Looking up ${done}/${total}…`;
+        }
+      );
+
+      let fetched = 0;
+      fetchedResults.forEach((r, j) => {
+        if (r && r.row) {
+          results[toFetch[j].index] = r.row;
+          if (r.row.level != null || r.row.cls || r.row.imageUrl) fetched++;
+        }
+      });
+
       lastImportSearchEndTime = Date.now();
-      importLookupStatus.textContent = fetched > 0
-        ? `Done — ${results.length} row(s), ${fetched} new lookup(s). Wait 5s before searching again.`
-        : `Done — ${results.length} row(s) from cache. Wait 5s before searching again.`;
+      importLookupStatus.textContent = `Done — ${results.length} row(s), ${fetched} new lookup(s). Wait 5s before searching again.`;
       importLookupStatus.style.color = 'var(--text-muted)';
       importLookupBtn.disabled = false;
       showReview(dedupeRows(results));
